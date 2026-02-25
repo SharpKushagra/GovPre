@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+.env.local
+.env.production
+
+# DB
+*.db
+*.sqlite
+
+# Attachments and temp
+backend/attachments/
+backend/tmp/
+attachments/
+tmp/
+
+# Alembic generated (keep versions)
+alembic/__pycache__/
+
+# Node.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Docker
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

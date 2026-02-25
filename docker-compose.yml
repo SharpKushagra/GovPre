@@ -1,0 +1,146 @@
+version: "3.9"
+
+services:
+  # ─── PostgreSQL with pgvector ─────────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: govpro_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: govpro
+      POSTGRES_PASSWORD: govpro_pass
+      POSTGRES_DB: govpreneurs
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U govpro -d govpreneurs" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Redis ────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: govpro_redis
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Backend API ──────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: govpro_backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://govpro:govpro_pass@postgres:5432/govpreneurs
+      DATABASE_URL_SYNC: postgresql://govpro:govpro_pass@postgres:5432/govpreneurs
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      SAMGOV_API_KEY: ${SAMGOV_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      AI_PROVIDER: ${AI_PROVIDER:-openai}
+      ENVIRONMENT: production
+      ALLOWED_ORIGINS: '["http://localhost:3000","http://frontend:3000"]'
+    ports:
+      - "8000:8000"
+    volumes:
+      - attachments:/app/attachments
+      - tmp_data:/app/tmp
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "
+        cd /app &&
+        alembic -c backend/alembic.ini upgrade head &&
+        uvicorn backend.main:app --host 0.0.0.0 --port 8000
+      "
+
+  # ─── Celery Worker ────────────────────────────────────────────────────────
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: govpro_celery_worker
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://govpro:govpro_pass@postgres:5432/govpreneurs
+      DATABASE_URL_SYNC: postgresql://govpro:govpro_pass@postgres:5432/govpreneurs
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      SAMGOV_API_KEY: ${SAMGOV_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      AI_PROVIDER: ${AI_PROVIDER:-openai}
+    volumes:
+      - attachments:/app/attachments
+      - tmp_data:/app/tmp
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      celery -A backend.workers.celery_app worker --loglevel=info --concurrency=4 --queues=celery
+
+  # ─── Celery Beat (Scheduler) ──────────────────────────────────────────────
+  celery_beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: govpro_celery_beat
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://govpro:govpro_pass@postgres:5432/govpreneurs
+      DATABASE_URL_SYNC: postgresql://govpro:govpro_pass@postgres:5432/govpreneurs
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      SAMGOV_API_KEY: ${SAMGOV_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    command: >
+      celery -A backend.workers.celery_app beat --loglevel=info --scheduler celery.beat:PersistentScheduler
+
+  # ─── Frontend (Next.js) ───────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: govpro_frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: http://backend:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    command: npm run dev
+
+volumes:
+  postgres_data:
+  redis_data:
+  attachments:
+  tmp_data:

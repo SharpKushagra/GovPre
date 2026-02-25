@@ -1,0 +1,31 @@
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+pydantic==2.10.3
+pydantic-settings==2.6.1
+
+# Database
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+psycopg2-binary==2.9.10
+alembic==1.14.0
+pgvector==0.3.6
+
+# Celery + Redis
+celery[redis]==5.4.0
+redis==5.2.1
+
+# HTTP client
+httpx==0.28.1
+
+# AI providers
+openai==1.58.1
+google-generativeai==0.8.3
+
+# Document processing
+PyMuPDF==1.25.1
+pdfplumber==0.11.4
+tiktoken==0.8.0
+
+# Utilities
+python-multipart==0.0.20
+python-dotenv==1.0.1
