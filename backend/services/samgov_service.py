@@ -4,7 +4,7 @@ SAM.gov Ingestion Service — fetches, stores, and updates government opportunit
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -42,24 +42,39 @@ def _extract_opportunity_data(raw: Dict[str, Any]) -> Dict[str, Any]:
     """Map SAM.gov API response fields to our Opportunity model."""
     # SAM.gov API v2 field names
     attachments = []
-    for res in raw.get("resourceLinks", []) or []:
-        attachments.append(
-            {
-                "file_name": res.get("name", ""),
-                "file_url": res.get("uri", ""),
-                "file_type": res.get("mimeType", ""),
-            }
-        )
+    resource_links = raw.get("resourceLinks", []) or []
+    for res in resource_links:
+        if isinstance(res, dict):
+            attachments.append(
+                {
+                    "file_name": res.get("name", ""),
+                    "file_url": res.get("uri", ""),
+                    "file_type": res.get("mimeType", ""),
+                }
+            )
 
     place_of_performance = ""
-    pop = raw.get("placeOfPerformance", {}) or {}
-    if pop:
-        parts = [
-            pop.get("city", {}).get("name", ""),
-            pop.get("state", {}).get("code", ""),
-            pop.get("country", {}).get("code", ""),
-        ]
+    pop = raw.get("placeOfPerformance", None)
+    if isinstance(pop, dict):
+        parts = []
+        city = pop.get("city")
+        state = pop.get("state")
+        country = pop.get("country")
+        if isinstance(city, dict):
+            parts.append(city.get("name", ""))
+        elif isinstance(city, str):
+            parts.append(city)
+        if isinstance(state, dict):
+            parts.append(state.get("code", ""))
+        elif isinstance(state, str):
+            parts.append(state)
+        if isinstance(country, dict):
+            parts.append(country.get("code", ""))
+        elif isinstance(country, str):
+            parts.append(country)
         place_of_performance = ", ".join(p for p in parts if p)
+    elif isinstance(pop, str):
+        place_of_performance = pop
 
     full_text_parts = [
         raw.get("title", ""),
@@ -67,25 +82,62 @@ def _extract_opportunity_data(raw: Dict[str, Any]) -> Dict[str, Any]:
     ]
     full_text = "\n\n".join(p for p in full_text_parts if p)
 
+    # Safely extract sub_agency
+    sub_agency = None
+    org_hierarchy = raw.get("organizationHierarchy")
+    if isinstance(org_hierarchy, list) and org_hierarchy:
+        first = org_hierarchy[0]
+        if isinstance(first, dict):
+            sub_agency = first.get("name")
+        elif isinstance(first, str):
+            sub_agency = first
+
+    # Safely extract department
+    dept = raw.get("department")
+    if isinstance(dept, dict):
+        department = dept.get("name")
+    elif isinstance(dept, str):
+        department = dept
+    else:
+        department = None
+
+    # Safely extract notice_type
+    raw_type = raw.get("type")
+    if isinstance(raw_type, dict):
+        notice_type = raw_type.get("value", str(raw_type))
+    elif isinstance(raw_type, str):
+        notice_type = raw_type
+    else:
+        notice_type = None
+
+    # Safely extract estimated_value
+    award = raw.get("award")
+    if isinstance(award, dict):
+        estimated_value = award.get("amount")
+    elif isinstance(award, (str, int, float)):
+        estimated_value = str(award)
+    else:
+        estimated_value = None
+
     return {
         "notice_id": raw.get("noticeId", ""),
         "title": raw.get("title", "Untitled Opportunity"),
         "description": raw.get("description", ""),
         "agency": raw.get("fullParentPathName", ""),
-        "sub_agency": raw.get("organizationHierarchy", [{}])[0].get("name") if raw.get("organizationHierarchy") else None,
-        "department": raw.get("department", {}).get("name") if raw.get("department") else None,
+        "sub_agency": sub_agency,
+        "department": department,
         "posted_date": _parse_dt(raw.get("postedDate")),
         "response_deadline": _parse_dt(raw.get("responseDeadLine")),
         "archive_date": _parse_dt(raw.get("archiveDate")),
         "last_modified_date": _parse_dt(raw.get("modifiedDate") or raw.get("modifiedOn")),
-        "notice_type": raw.get("type", {}).get("value") if isinstance(raw.get("type"), dict) else raw.get("type"),
+        "notice_type": notice_type,
         "solicitation_number": raw.get("solicitationNumber"),
         "naics_code": raw.get("naicsCode"),
         "naics_description": raw.get("classificationCode"),
         "set_aside_type": raw.get("typeOfSetAside"),
         "place_of_performance": place_of_performance,
         "contract_type": raw.get("contractType"),
-        "estimated_value": raw.get("award", {}).get("amount") if raw.get("award") else None,
+        "estimated_value": estimated_value,
         "attachments": attachments,
         "full_text": full_text,
         "active": raw.get("active", "Yes") in ("Yes", True, "true", "1"),
@@ -114,17 +166,22 @@ class SAMGovService:
     ) -> List[Dict[str, Any]]:
         """
         Fetch active opportunities from SAM.gov.
+        SAM.gov v2 API requires postedFrom and postedTo date parameters.
+        Defaults to last 30 days if not specified.
         """
+        # SAM.gov v2 API requires postedFrom/postedTo (MM/DD/YYYY format)
+        if not posted_from:
+            posted_from = (datetime.now() - timedelta(days=30)).strftime("%m/%d/%Y")
+        if not posted_to:
+            posted_to = datetime.now().strftime("%m/%d/%Y")
+
         params: Dict[str, Any] = {
             "limit": limit,
             "offset": offset,
             "ptype": "o,p,k,r",  # solicitations
-            "active": "Yes",
+            "postedFrom": posted_from,
+            "postedTo": posted_to,
         }
-        if posted_from:
-            params["postedFrom"] = posted_from
-        if posted_to:
-            params["postedTo"] = posted_to
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
@@ -133,6 +190,12 @@ class SAMGovService:
                     params=params,
                     headers=self._get_headers(),
                 )
+                # Handle rate limiting
+                if response.status_code == 429:
+                    data = response.json()
+                    next_access = data.get("nextAccessTime", "unknown")
+                    logger.warning(f"SAM.gov rate limit exceeded. Next access: {next_access}")
+                    return []
                 response.raise_for_status()
                 data = response.json()
                 return data.get("opportunitiesData", []) or []

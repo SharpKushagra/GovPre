@@ -36,7 +36,9 @@ export default function HomePage() {
                         Generate a Proposal
                     </Link>
                     <a
-                        href="/docs"
+                        href="http://localhost:8000/docs"
+                        target="_blank"
+                        rel="noopener noreferrer"
                         className="flex items-center gap-2 px-8 py-4 bg-white/10 text-white border border-white/20 rounded-2xl font-bold text-base hover:bg-white/20 transition-all"
                     >
                         API Documentation
